@@ -1,0 +1,5 @@
+# 原始行情数据（21MB，仅本地再生成 data.js 时需要）
+数据/
+__pycache__/
+*.pyc
+.DS_Store
