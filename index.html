@@ -38,6 +38,17 @@
     width:96px; background:var(--panel2); color:var(--text);
     border:1px solid var(--border); border-radius:6px; padding:5px 8px; font-size:13px;
   }
+  header input[type=checkbox]{
+    width:15px; height:15px; accent-color:var(--accent); cursor:pointer;
+  }
+  input[type=date]{
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:5px 8px; font-size:13px; color-scheme:dark;
+  }
+  select{
+    background:var(--panel); color:var(--text); border:1px solid var(--border);
+    border-radius:6px; padding:5px 6px; font-size:13px; cursor:pointer;
+  }
   .btn{
     background:var(--panel2); color:var(--text); border:1px solid var(--border);
     border-radius:6px; padding:6px 12px; cursor:pointer; font-size:13px; white-space:nowrap;
@@ -112,6 +123,7 @@
     <button id="btnDaily" class="on">日线</button>
     <button id="btn5m">5分钟</button>
   </div>
+  <label><input type="checkbox" id="chkRefLine" checked>参考线</label>
   <div class="spacer"></div>
   <label>初始资金
     <input id="initCap" type="number" min="0" step="1000" value="100000">
@@ -145,6 +157,11 @@
         <div class="stat"><label>当前时间</label><span id="trainTime">—</span></div>
         <div class="stat" style="margin-left:auto"><label>参考价/当前价</label><span class="bigprice" id="refPrice">-</span></div>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label class="muted" style="font-size:12px">默认起始日期</label>
+        <input type="date" id="trainDate" style="width:140px">
+        <span class="muted" style="font-size:11px">留空则按最近K线</span>
+      </div>
       <div class="hint" id="trainHint">开启训练模式后才能买卖；用「下一步」按收盘价推进，或用 ← → 方向键。</div>
     </div>
 
@@ -152,11 +169,13 @@
       <h3>买卖</h3>
       <div class="row">
         <input id="buyQty" type="number" min="1" placeholder="买入份额">
+        <select id="buyFrac" disabled><option value="">份</option></select>
         <span class="amt" id="buyAmt"></span>
         <button class="btn buy" id="btnBuy" disabled>买入</button>
       </div>
       <div class="row" style="margin-top:6px">
         <input id="sellQty" type="number" min="1" placeholder="卖出份额">
+        <select id="sellFrac" disabled><option value="">份</option></select>
         <span class="amt" id="sellAmt"></span>
         <button class="btn sell" id="btnSell" disabled>卖出</button>
       </div>
@@ -210,6 +229,7 @@
   let viewRefPrice = null;      // 浏览模式点击设定的参考价
   let trainStartIdx = null;     // 浏览模式点击设定的训练起点
   let customMAs = [];           // 用户新增均线周期
+  let showRefLine = true;       // 是否显示参考线
 
   const st = { initial:100000, cash:100000, shares:0, avgCost:0, realized:0, trades:[] };
   let mainChart=null, indexChart=null;
@@ -231,6 +251,12 @@
   function pad(n){ return String(n).padStart(2,'0'); }
   function fmtDate(ms){ const d=new Date(ms); return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate()); }
   function fmtDateTime(ms){ const d=new Date(ms); return fmtDate(ms)+' '+pad(d.getHours())+':'+pad(d.getMinutes()); }
+  function dateStrToMs(dateStr){
+    if(!dateStr) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+    if(!m) return null;
+    return new Date(+m[1], +m[2]-1, +m[3], 23, 59, 59, 999).getTime();
+  }
   function axisLabel(ms){ return period==='daily' ? fmtDate(ms) : fmtDateTime(ms); }
 
   function calcMA(arr, p){
@@ -259,6 +285,9 @@
     return s.c[s.c.length-1];
   }
   function startBars(){ return period==='daily' ? 120 : 240; }
+  function lockZoom(){
+    return mode==='train' && dateStrToMs($('trainDate').value)!=null;
+  }
   function sliceEnd(instr){
     if(mode!=='train') return null;                       // 全量
     if(instr==='main') return Math.max(0, Math.min(curIdx, series('main').t.length-1));
@@ -269,6 +298,7 @@
 
   function buildMarkLine(){
     const data = [];
+    if(!showRefLine) return data;
     const price = getRefPrice();
     if(price>0){
       data.push({ yAxis: price, lineStyle:{color:'#facc15', type:'dashed', width:1},
@@ -337,29 +367,35 @@
     return {
       backgroundColor:'transparent',
       animation:false,
-      axisPointer:{ link:[{xAxisIndex:'all'}], label:{backgroundColor:'#334155', color:'#e2e8f0'} },
+      axisPointer:{ type:'cross', link:[{xAxisIndex:'all'}], label:{backgroundColor:'#334155', color:'#e2e8f0'} },
       tooltip:{
-        trigger:'axis', axisPointer:{type:'cross'},
+        trigger:'item',
         backgroundColor:'#111827', borderColor:'#334155', textStyle:{color:'#e2e8f0'},
-        formatter:function(params){
-          if(!Array.isArray(params)) params=[params];
-          const k = params.find(p=>p.seriesType==='candlestick');
-          if(!k) return '';
-          const i = k.dataIndex;
+        formatter:function(p){
+          if(Array.isArray(p)) p = p[0];
+          if(!p || p.dataIndex==null) return '';
+          const i = p.dataIndex;
           const tms = s.t[i];
+          if(tms==null) return '';
           const t = period==='daily' ? fmtDate(tms) : fmtDateTime(tms);
-          const o=s.o[i], c=s.c[i], l=s.l[i], h=s.h[i];
-          const closeUp = c>=o;
-          let html = '<div class="tip"><b>'+t+'</b><div>'
-            +'开 <span style="color:#fca5a5">'+fmtPrice(o)+'</span> '
-            +'高 <span style="color:#fca5a5">'+fmtPrice(h)+'</span> '
-            +'低 <span style="color:#86efac">'+fmtPrice(l)+'</span> '
-            +'收 <span style="color:'+(closeUp?'#fca5a5':'#86efac')+'">'+fmtPrice(c)+'</span></div>';
-          let maHtml='';
-          for(const m of maArr){ const v=m.ma[i]; if(v!=null) maHtml += '<span style="color:'+m.color+'">MA'+m.p+' '+fmtPrice(v)+'</span> '; }
-          if(maHtml) html += '<div>'+maHtml+'</div>';
-          html += '<div>量 '+fmtBig(s.v[i])+'</div>';
-          return html+'</div>';
+          if(p.seriesType==='candlestick'){
+            const o=s.o[i], c=s.c[i], l=s.l[i], h=s.h[i];
+            const closeUp = c>=o;
+            return '<div class="tip"><b>'+t+'</b><div>'
+              +'开 <span style="color:#fca5a5">'+fmtPrice(o)+'</span> '
+              +'高 <span style="color:#fca5a5">'+fmtPrice(h)+'</span> '
+              +'低 <span style="color:#86efac">'+fmtPrice(l)+'</span> '
+              +'收 <span style="color:'+(closeUp?'#fca5a5':'#86efac')+'">'+fmtPrice(c)+'</span></div></div>';
+          }
+          if(p.seriesType==='bar'){
+            return '<div class="tip"><b>'+t+'</b><div>量 '+fmtBig(s.v[i])+'</div></div>';
+          }
+          if(p.seriesType==='line'){
+            const v = p.value;
+            if(v==null) return '';
+            return '<div class="tip"><b>'+t+'</b><div><span style="color:'+(p.color||'#8b93a3')+'">'+p.seriesName+' '+fmtPrice(v)+'</span></div></div>';
+          }
+          return '';
         }
       },
       legend:{
@@ -383,8 +419,10 @@
          axisLabel:{show:false}, splitLine:{show:false}, axisLine:{show:false}}
       ],
       dataZoom:[
-        {type:'inside', xAxisIndex:[0,1], start:zStart, end:100},
+        {type:'inside', xAxisIndex:[0,1], start:zStart, end:100,
+         zoomOnMouseWheel:true, moveOnMouseMove:!lockZoom(), moveOnMouseWheel:!lockZoom()},
         {type:'slider', xAxisIndex:[0,1], bottom:2, height:16, showDetail:false, start:zStart, end:100,
+         disabled:lockZoom(),
          borderColor:'#1f2530', backgroundColor:'#12151c', fillerColor:'rgba(59,130,246,0.15)',
          handleStyle:{color:'#3b82f6'}, moveHandleStyle:{color:'#3b82f6'}, textStyle:{color:'#8b93a3'}}
       ],
@@ -394,9 +432,23 @@
     };
   }
 
-  function render(){
+  function getZoomState(chart){
+    const opt = chart.getOption();
+    if(opt && opt.dataZoom && opt.dataZoom[0]){
+      return { start: opt.dataZoom[0].start, end: opt.dataZoom[0].end };
+    }
+    return null;
+  }
+  function applyZoomState(chart, z){
+    if(!z) return;
+    chart.dispatchAction({type:'dataZoom', dataZoomIndex:0, start:z.start, end:z.end});
+    chart.dispatchAction({type:'dataZoom', dataZoomIndex:1, start:z.start, end:z.end});
+  }
+  function render(keepZoom){
+    const z = keepZoom ? getZoomState(mainChart) : null;
     mainChart.setOption(buildOption('main', true), {notMerge:true});
     indexChart.setOption(buildOption('index', false), {notMerge:true});
+    if(z) applyZoomState(mainChart, z);
   }
   function refreshMarkers(){
     mainChart.setOption({ series:[{ name:'K线',
@@ -500,7 +552,7 @@
     st.cash -= amount;
     st.avgCost = st.shares>0 ? (oldCost + amount)/st.shares : 0;
     st.trades.push({ time:tradeTime(), side:'buy', shares:qty, price:price, amount:amount });
-    updatePanel(); render(); logTrade();
+    updatePanel(); refreshMarkers(); logTrade();
   }
   function sell(){
     if(mode!=='train'){ alert('请先开启训练模式'); return; }
@@ -516,7 +568,24 @@
     st.shares -= q;
     if(st.shares===0) st.avgCost = 0;
     st.trades.push({ time:tradeTime(), side:'sell', shares:q, price:price, amount:amount, pl:pl });
-    updatePanel(); render(); logTrade();
+    updatePanel(); refreshMarkers(); logTrade();
+  }
+  function applyFrac(side){
+    const price = getRefPrice();
+    if(!(price>0)) return;
+    const sel = $(side==='buy' ? 'buyFrac' : 'sellFrac');
+    const v = parseFloat(sel.value);
+    if(!(v>0)) return;
+    const inputId = side==='buy' ? 'buyQty' : 'sellQty';
+    let qty;
+    if(side==='buy'){
+      qty = Math.floor(st.cash * v / price);
+    } else {
+      qty = Math.floor(st.shares * v);
+    }
+    if(qty<1) qty = 1;
+    $(inputId).value = qty;
+    updatePanel();
   }
   function exportCSV(){
     const rows = [['时间','方向','份额','价格','金额','单笔盈亏']];
@@ -559,14 +628,25 @@
     $('btnTrain').classList.toggle('active', on);
     $('btnBuy').disabled = !on;
     $('btnSell').disabled = !on;
+    $('buyFrac').disabled = !on;
+    $('sellFrac').disabled = !on;
     $('btnNext').disabled = !on;
     $('btnPrev').disabled = !on;
     $('btnNext').textContent = period==='daily' ? '下一天' : '下一根';
     $('btnPrev').textContent = period==='daily' ? '上一天' : '上一根';
     if(on){
       const s = series('main');
-      curIdx = (trainStartIdx!=null && trainStartIdx>=0 && trainStartIdx<s.t.length)
-        ? trainStartIdx : Math.max(0, s.t.length - startBars());
+      const dm = dateStrToMs($('trainDate').value);
+      let idx;
+      if(dm!=null){
+        const i = nearestIdx(s.t, dm);
+        idx = i>=0 ? i : Math.max(0, s.t.length - startBars());
+      } else if(trainStartIdx!=null && trainStartIdx>=0 && trainStartIdx<s.t.length){
+        idx = trainStartIdx;
+      } else {
+        idx = Math.max(0, s.t.length - startBars());
+      }
+      curIdx = idx;
       render();
     } else {
       curIdx = -1;
@@ -578,7 +658,7 @@
     if(mode!=='train') return;
     const s = series('main');
     curIdx = Math.max(0, Math.min(curIdx+delta, s.t.length-1));
-    render();
+    render(true);
     updatePanel();
   }
   function setPeriod(p){
@@ -606,7 +686,7 @@
       if(p.dataIndex<0 || p.dataIndex>=s.c.length) return;
       if(mode==='train'){
         curIdx = p.dataIndex;      // 回退到点击的K线
-        render(); updatePanel();
+        render(true); updatePanel();
       } else {
         viewRefPrice = s.c[p.dataIndex];
         trainStartIdx = p.dataIndex;
@@ -622,11 +702,30 @@
 
     $('btnDaily').onclick = function(){ setPeriod('daily'); };
     $('btn5m').onclick = function(){ setPeriod('min5'); };
+    $('chkRefLine').onchange = function(){ showRefLine = $('chkRefLine').checked; refreshMarkers(); };
     $('btnTrain').onclick = function(){ setMode(mode==='train'?'view':'train'); };
     $('btnPrev').onclick = function(){ step(-1); };
     $('btnNext').onclick = function(){ step(1); };
     $('btnBuy').onclick = buy;
     $('btnSell').onclick = sell;
+    (function(){
+      let html = '';
+      for(let i=1;i<=10;i++) html += '<option value="'+(i/10)+'">'+i+'/10</option>';
+      $('buyFrac').insertAdjacentHTML('beforeend', html);
+      $('sellFrac').insertAdjacentHTML('beforeend', html);
+    })();
+    $('buyFrac').onchange = function(){ applyFrac('buy'); };
+    $('sellFrac').onchange = function(){ applyFrac('sell'); };
+    $('trainDate').addEventListener('change', function(){
+      if(mode!=='train') return;
+      const s = series('main');
+      const dm = dateStrToMs($('trainDate').value);
+      if(dm==null){ render(true); updatePanel(); return; }
+      const i = nearestIdx(s.t, dm);
+      curIdx = i>=0 ? i : curIdx;
+      render();
+      updatePanel();
+    });
     $('btnExport').onclick = function(){ if(st.trades.length===0){ alert('暂无交易记录'); return; } exportCSV(); };
     $('btnReset').onclick = resetAll;
     $('btnSetInit').onclick = setInitial;
@@ -639,8 +738,8 @@
       $('maInput').value='';
       renderMAChips(); render();
     };
-    $('buyQty').addEventListener('input', updatePanel);
-    $('sellQty').addEventListener('input', updatePanel);
+    $('buyQty').addEventListener('input', function(){ $('buyFrac').value=''; updatePanel(); });
+    $('sellQty').addEventListener('input', function(){ $('sellFrac').value=''; updatePanel(); });
     document.addEventListener('keydown', function(e){
       if(e.target && (e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')) return;
       if(mode!=='train') return;
