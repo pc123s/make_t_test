@@ -2,7 +2,7 @@
 """
 把 做T参考工具/数据 下的 4 个 CSV 压成前端可直接引用的 data.js
 - 日线: 全量
-- 5分钟: 只保留最近 N 个交易日(默认 250), 减小体积
+- 5分钟: 只保留最近 N 个交易日(默认 2500, 即全量历史); 嫌体积大/加载慢可传更小的 N
 用法:  D:\Python37\python.exe _build_data.py [N]
 """
 import sys, os, json
@@ -45,8 +45,32 @@ def series(df, time_col, has_time, ms_func):
         "v": [int(round(float(v))) for v in df["vol"]],
     }
 
+def norm_vol_to_hand(df5, daily_df, daily_date_col, daily_date_fmt):
+    """
+    把 5 分钟成交量统一成「手」(1手=100股)，与日线 vol 单位一致。
+    数据源里 5 分钟 vol 大多数日期是「股」(=手*100)，少数日期是「手」，
+    两者相差 100 倍，离群值会把量柱压扁。用「当日 5min 总和 / 日线 vol」判断：
+    若 ≈100 倍说明该日是「股」，除以 100 归一到「手」。
+    """
+    if "trade_date" not in df5.columns:
+        df5["trade_date"] = df5["trade_time"].str[:10]
+    daily_vol = {}
+    for _, r in daily_df.iterrows():
+        d = str(r[daily_date_col]).strip()
+        if daily_date_fmt == "yyyymmdd" and len(d) == 8:
+            d = d[:4] + "-" + d[4:6] + "-" + d[6:8]
+        daily_vol[d] = float(r["vol"])
+    for d, grp in df5.groupby("trade_date"):
+        dv = daily_vol.get(d)
+        if not dv or dv <= 0:
+            continue
+        s = float(grp["vol"].sum())
+        if s / dv > 50:
+            df5.loc[grp.index, "vol"] = df5.loc[grp.index, "vol"] / 100.0
+    return df5
+
 def main():
-    n = keep_days(sys.argv[1]) if len(sys.argv) > 1 else 250
+    n = keep_days(sys.argv[1]) if len(sys.argv) > 1 else 2500
 
     # 主 ETF 159952 日线
     m1d = pd.read_csv(os.path.join(DATA, "159952_1d.csv"), encoding="utf-8-sig")
@@ -56,6 +80,7 @@ def main():
     # 主 ETF 159952 5分钟(截最近 n 个交易日)
     m5 = pd.read_csv(os.path.join(DATA, "159952_5min.csv"), encoding="utf-8-sig")
     m5 = m5.sort_values("trade_time").reset_index(drop=True)
+    m5 = norm_vol_to_hand(m5, m1d, "trade_date", "dash")
     dates = sorted(m5["trade_date"].unique())[-n:]
     m5 = m5[m5["trade_date"].isin(dates)].reset_index(drop=True)
     main_min5 = series(m5, "trade_time", True, to_ms)
@@ -69,6 +94,7 @@ def main():
     i5 = pd.read_csv(os.path.join(DATA, "上证指数_000001SH_5min_2017_2026.csv"), encoding="utf-8-sig")
     i5 = i5.sort_values("trade_time").reset_index(drop=True)
     i5["trade_date"] = i5["trade_time"].str[:10]
+    i5 = norm_vol_to_hand(i5, i1d, "trade_date", "yyyymmdd")
     dates = sorted(i5["trade_date"].unique())[-n:]
     i5 = i5[i5["trade_date"].isin(dates)].reset_index(drop=True)
     index_min5 = series(i5, "trade_time", True, to_ms_sh)

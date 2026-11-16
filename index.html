@@ -66,6 +66,7 @@
   .clabel{height:26px; flex:0 0 26px; display:flex; align-items:center; gap:8px; padding:0 10px; font-size:12px; color:var(--muted);}
   .clabel b{color:#fff; font-size:12px;}
   .clabel .dot{width:8px; height:8px; border-radius:50%;}
+  .clabel .chg{font-weight:700; font-variant-numeric:tabular-nums;}
   #mainChart,#indexChart{flex:1; min-height:0;}
   /* ---------- side panel ---------- */
   aside{
@@ -124,6 +125,7 @@
     <button id="btn5m">5分钟</button>
   </div>
   <label><input type="checkbox" id="chkRefLine" checked>参考线</label>
+  <label><input type="checkbox" id="chkVolume" checked>成交量</label>
   <div class="spacer"></div>
   <label>初始资金
     <input id="initCap" type="number" min="0" step="1000" value="100000">
@@ -140,7 +142,7 @@
       <div id="mainChart"></div>
     </div>
     <div class="chartbox" id="indexBox">
-      <div class="clabel"><span class="dot" style="background:#f7b500"></span><b>副图 · 上证指数</b></div>
+      <div class="clabel"><span class="dot" style="background:#f7b500"></span><b>副图 · 上证指数</b><span id="idxChange" class="chg"></span></div>
       <div id="indexChart"></div>
     </div>
   </div>
@@ -159,8 +161,7 @@
       </div>
       <div class="row" style="margin-top:8px">
         <label class="muted" style="font-size:12px">默认起始日期</label>
-        <input type="date" id="trainDate" style="width:140px">
-        <span class="muted" style="font-size:11px">留空则按最近K线</span>
+        <select id="trainDate" style="width:160px"></select>
       </div>
       <div class="hint" id="trainHint">开启训练模式后才能买卖；用「下一步」按收盘价推进，或用 ← → 方向键。</div>
     </div>
@@ -185,9 +186,12 @@
       <h3>账户</h3>
       <div class="grid2">
         <div class="stat"><label>持仓</label><span id="holdings">0 份</span></div>
+        <div class="stat"><label>今日可卖</label><span id="sellableToday">0 份</span></div>
         <div class="stat"><label>成本价</label><span id="avgCost">—</span></div>
         <div class="stat"><label>持仓市值</label><span id="mv">0.00</span></div>
         <div class="stat"><label>现金</label><span id="cash">0.00</span></div>
+        <div class="stat"><label>仓位</label><span id="position">0.0%</span></div>
+        <div class="stat"><label>满仓份额</label><span id="fullShares">0 份</span></div>
         <div class="stat"><label>浮动盈亏</label><span id="unreal">0.00</span></div>
         <div class="stat"><label>已实现盈亏</label><span id="realized">0.00</span></div>
         <div class="stat"><label>总资产</label><span id="assets">0.00</span></div>
@@ -230,6 +234,10 @@
   let trainStartIdx = null;     // 浏览模式点击设定的训练起点
   let customMAs = [];           // 用户新增均线周期
   let showRefLine = true;       // 是否显示参考线
+  let showVolume = true;        // 是否显示成交量副图
+  let savedViewZoom = null;     // 进入训练模式前的缩放位置(关闭训练时还原)
+  let t1Date = null;            // 当前交易日(用于 T+1 判断)
+  let sellableToday = 0;        // 今日可卖份额(当日开盘前持有)
 
   const st = { initial:100000, cash:100000, shares:0, avgCost:0, realized:0, trades:[] };
   let mainChart=null, indexChart=null;
@@ -270,6 +278,18 @@
     while(lo<=hi){ const mid=(lo+hi)>>1; if(times[mid]<=time){ ans=mid; lo=mid+1; } else hi=mid-1; }
     return ans;
   }
+  function firstIdxOfDate(s, dateStr){
+    // 找某个交易日的第一根(开盘)K线索引
+    let lo=0, hi=s.t.length-1, ans=-1;
+    while(lo<=hi){
+      const mid=(lo+hi)>>1;
+      const d = fmtDate(s.t[mid]);
+      if(d < dateStr) lo=mid+1;
+      else if(d > dateStr) hi=mid-1;
+      else { ans=mid; hi=mid-1; }
+    }
+    return ans;
+  }
   function allMAs(){
     const list = BASE_MA.map(p=>({p, color:MA_COLORS[p]}));
     customMAs.forEach((p,i)=>{ list.push({p, color:EXTRA_COLORS[i%EXTRA_COLORS.length]}); });
@@ -294,6 +314,11 @@
     const mt = series('main').t[Math.max(0, Math.min(curIdx, series('main').t.length-1))];
     const i = nearestIdx(series('index').t, mt);
     return Math.max(0, i);
+  }
+  function currentIdxOf(instr){
+    const s = series(instr);
+    const end = sliceEnd(instr);
+    return (end==null) ? s.t.length-1 : Math.max(0, Math.min(end, s.t.length-1));
   }
 
   function buildMarkLine(){
@@ -364,6 +389,34 @@
       zStart = n<=w ? 0 : (n-w)/n*100;
     }
 
+    // 成交量副图可收起/展开
+    const legendData = ['K线'].concat(allMAs().map(m=>'MA'+m.p));
+    const grid = showVolume
+      ? [{left:62, right:16, top:30, height:'58%'},{left:62, right:16, top:'77%', height:'13%'}]
+      : [{left:62, right:16, top:30, height:'62%'}];
+    const xAxis = [
+      {type:'category', gridIndex:0, data:labels, boundaryGap:true,
+       axisLine:{lineStyle:{color:'#334155'}}, axisLabel:{color:'#8b93a3', hideOverlap:true}, axisTick:{show:false}, splitLine:{show:false}}
+    ];
+    if(showVolume){
+      xAxis.push({type:'category', gridIndex:1, data:labels, boundaryGap:true,
+       axisLine:{lineStyle:{color:'#334155'}}, axisLabel:{show:false}, axisTick:{show:false}, splitLine:{show:false}});
+    }
+    const yAxis = [
+      {gridIndex:0, scale:true, position:'left',
+       splitLine:{lineStyle:{color:'#1f2530'}}, axisLabel:{color:'#8b93a3'}, axisLine:{show:false}}
+    ];
+    if(showVolume){
+      yAxis.push({gridIndex:1, scale:true, position:'left', splitNumber:2,
+       axisLabel:{show:false}, splitLine:{show:false}, axisLine:{show:false}});
+    }
+    const seriesArr = [candle].concat(maSeries);
+    if(showVolume){
+      legendData.push('成交量');
+      seriesArr.push({name:'成交量', type:'bar', xAxisIndex:1, yAxisIndex:1, data:vol, barWidth:'60%'});
+    }
+    const zi = showVolume ? [0,1] : [0];
+
     return {
       backgroundColor:'transparent',
       animation:false,
@@ -399,36 +452,21 @@
         }
       },
       legend:{
-        data:['K线'].concat(allMAs().map(m=>'MA'+m.p)).concat(['成交量']),
+        data:legendData,
         textStyle:{color:'#8b93a3', fontSize:11}, top:2, itemWidth:14, itemHeight:2, type:'scroll'
       },
-      grid:[
-        {left:62, right:16, top:30, height:'58%'},
-        {left:62, right:16, top:'77%', height:'13%'}
-      ],
-      xAxis:[
-        {type:'category', gridIndex:0, data:labels, boundaryGap:true,
-         axisLine:{lineStyle:{color:'#334155'}}, axisLabel:{color:'#8b93a3', hideOverlap:true}, axisTick:{show:false}, splitLine:{show:false}},
-        {type:'category', gridIndex:1, data:labels, boundaryGap:true,
-         axisLine:{lineStyle:{color:'#334155'}}, axisLabel:{show:false}, axisTick:{show:false}, splitLine:{show:false}}
-      ],
-      yAxis:[
-        {gridIndex:0, scale:true, position:'left',
-         splitLine:{lineStyle:{color:'#1f2530'}}, axisLabel:{color:'#8b93a3'}, axisLine:{show:false}},
-        {gridIndex:1, scale:true, position:'left', splitNumber:2,
-         axisLabel:{show:false}, splitLine:{show:false}, axisLine:{show:false}}
-      ],
+      grid:grid,
+      xAxis:xAxis,
+      yAxis:yAxis,
       dataZoom:[
-        {type:'inside', xAxisIndex:[0,1], start:zStart, end:100,
+        {type:'inside', xAxisIndex:zi, start:zStart, end:100,
          zoomOnMouseWheel:true, moveOnMouseMove:!lockZoom(), moveOnMouseWheel:!lockZoom()},
-        {type:'slider', xAxisIndex:[0,1], bottom:2, height:16, showDetail:false, start:zStart, end:100,
+        {type:'slider', xAxisIndex:zi, bottom:2, height:16, showDetail:false, start:zStart, end:100,
          disabled:lockZoom(),
          borderColor:'#1f2530', backgroundColor:'#12151c', fillerColor:'rgba(59,130,246,0.15)',
          handleStyle:{color:'#3b82f6'}, moveHandleStyle:{color:'#3b82f6'}, textStyle:{color:'#8b93a3'}}
       ],
-      series:[ candle ].concat(maSeries).concat([
-        {name:'成交量', type:'bar', xAxisIndex:1, yAxisIndex:1, data:vol, barWidth:'60%'}
-      ])
+      series:seriesArr
     };
   }
 
@@ -481,11 +519,15 @@
     const unreal = st.shares>0 ? (price - st.avgCost)*st.shares : 0;
     const assets = st.cash + mv;
     const totalPL = assets - st.initial;
+    const fullShares = price>0 ? assets/price : 0;
+    const posPct = assets>0 ? mv/assets*100 : 0;
     set('refPrice', fmtPrice(price));
     set('holdings', st.shares+' 份');
     set('avgCost', st.shares>0 ? fmtPrice(st.avgCost) : '—');
     set('mv', fmtMoney(mv));
     set('cash', fmtMoney(st.cash));
+    set('position', posPct.toFixed(1)+'%');
+    set('fullShares', Math.round(fullShares)+' 份');
     set('unreal', fmtMoney(unreal), unreal>=0?'up':'down');
     set('realized', fmtMoney(st.realized), st.realized>=0?'up':'down');
     set('assets', fmtMoney(assets));
@@ -498,8 +540,38 @@
       const s = series('main');
       const i = Math.max(0, Math.min(curIdx, s.t.length-1));
       set('trainTime', (period==='daily'?fmtDate:fmtDateTime)(s.t[i]));
+      // T+1：跨日时记录「今日可卖份额」= 当日开盘前持有的份额
+      const d = fmtDate(s.t[i]);
+      if(d !== t1Date){ t1Date = d; sellableToday = st.shares; }
+      set('sellableToday', sellableToday+' 份');
     } else {
       set('trainTime', '—');
+      set('sellableToday', '—');
+    }
+    // 上证指数涨跌幅：5分钟=相对当日开盘；日线=相对前收
+    const is = series('index');
+    const ii = currentIdxOf('index');
+    if(is.t.length>0 && ii>=0 && is.c[ii]!=null){
+      let base = null;
+      if(period === 'min5'){
+        const day = fmtDate(is.t[ii]);
+        const dayStart = firstIdxOfDate(is, day);
+        base = (dayStart>=0) ? is.o[dayStart] : is.o[ii];
+      } else if(ii>=1){
+        base = is.c[ii-1];
+      } else {
+        base = is.o[ii];
+      }
+      if(base && base>0){
+        const cur = is.c[ii];
+        const pct = (cur - base)/base*100;
+        const sign = pct>=0 ? '+' : '';
+        set('idxChange', cur.toFixed(2)+'  '+sign+pct.toFixed(2)+'%', (pct>=0?'up':'down')+' chg');
+      } else {
+        set('idxChange', '', 'chg');
+      }
+    } else {
+      set('idxChange', '', 'chg');
     }
   }
   function logTrade(){
@@ -534,6 +606,23 @@
     });
   }
 
+  function populateTrainDates(){
+    const sel = $('trainDate');
+    const s = series('main');
+    const dates = [];
+    let prev = null;
+    for(let i=0;i<s.t.length;i++){
+      const d = fmtDate(s.t[i]);
+      if(d !== prev){ dates.push(d); prev = d; }
+    }
+    dates.reverse();   // 最近的在前
+    let html = '<option value="">留空则按最近K线</option>';
+    for(let i=0;i<dates.length;i++){
+      html += '<option value="'+dates[i]+'">'+dates[i]+'</option>';
+    }
+    sel.innerHTML = html;
+  }
+
   // ---------- trading ----------
   function tradeTime(){
     const s = series('main');
@@ -559,7 +648,19 @@
     const qty = parseInt($('sellQty').value,10);
     if(!qty || qty<=0){ alert('请输入卖出份额'); return; }
     if(st.shares<=0){ alert('无持仓可卖'); return; }
-    const q = Math.min(qty, st.shares);
+    let q = Math.min(qty, st.shares);
+    // A股 T+1：当日买入的份额当日不可卖，只能卖「今日开盘前已持有」的份额
+    if(q > sellableToday){
+      if(sellableToday <= 0){
+        alert('T+1 提醒：今日无可用卖出份额（当日买入的份额需明日才能卖）');
+        return;
+      }
+      const locked = st.shares - sellableToday;
+      if(!confirm('T+1 提醒：今日可卖 '+sellableToday+' 份（昨日及以前买入）；今日新买入的 '+locked+' 份需明日才能卖。\n\n是否只卖出 '+sellableToday+' 份？')){
+        return;
+      }
+      q = sellableToday;
+    }
     const price = getRefPrice();
     const amount = q*price;
     const pl = (price - st.avgCost)*q;
@@ -608,6 +709,7 @@
     if(!confirm('将导出买卖记录CSV并把账户清零（现金回到初始资金）？')) return;
     if(st.trades.length>0) exportCSV();
     st.cash = st.initial; st.shares = 0; st.avgCost = 0; st.realized = 0; st.trades = [];
+    t1Date = null; sellableToday = 0;
     $('buyQty').value=''; $('sellQty').value='';
     updatePanel(); refreshMarkers(); logTrade();
   }
@@ -616,14 +718,17 @@
     if(!(v>=0)){ alert('请输入初始资金'); return; }
     if((st.trades.length>0 || st.shares>0) && !confirm('修改初始资金会重置账户，确定？')) return;
     st.initial = v; st.cash = v; st.shares = 0; st.avgCost = 0; st.realized = 0; st.trades = [];
+    t1Date = null; sellableToday = 0;
     $('buyQty').value=''; $('sellQty').value='';
     updatePanel(); refreshMarkers(); logTrade();
   }
 
   // ---------- mode / period ----------
   function setMode(m){
+    const wasTrain = mode==='train';
     mode = m;
     const on = mode==='train';
+    if(on && !wasTrain) t1Date = null;   // 进入训练模式时重置 T+1 基准日
     $('btnTrain').textContent = on ? '训练模式：开' : '训练模式：关';
     $('btnTrain').classList.toggle('active', on);
     $('btnBuy').disabled = !on;
@@ -635,11 +740,12 @@
     $('btnNext').textContent = period==='daily' ? '下一天' : '下一根';
     $('btnPrev').textContent = period==='daily' ? '上一天' : '上一根';
     if(on){
+      if(!wasTrain) savedViewZoom = getZoomState(mainChart);   // 记住进入训练前的停留位置
       const s = series('main');
-      const dm = dateStrToMs($('trainDate').value);
+      const dateStr = $('trainDate').value;
       let idx;
-      if(dm!=null){
-        const i = nearestIdx(s.t, dm);
+      if(dateStr){
+        const i = firstIdxOfDate(s, dateStr);
         idx = i>=0 ? i : Math.max(0, s.t.length - startBars());
       } else if(trainStartIdx!=null && trainStartIdx>=0 && trainStartIdx<s.t.length){
         idx = trainStartIdx;
@@ -651,6 +757,7 @@
     } else {
       curIdx = -1;
       render();
+      if(savedViewZoom) applyZoomState(mainChart, savedViewZoom);   // 关闭后回到一开始的停留位置
     }
     updatePanel();
   }
@@ -667,6 +774,8 @@
     $('btn5m').classList.toggle('on', p==='min5');
     viewRefPrice = null;
     trainStartIdx = null;
+    t1Date = null;
+    populateTrainDates();
     curIdx = mode==='train' ? Math.max(0, series('main').t.length - startBars()) : -1;
     $('btnNext').textContent = p==='daily' ? '下一天' : '下一根';
     $('btnPrev').textContent = p==='daily' ? '上一天' : '上一根';
@@ -695,6 +804,7 @@
     });
 
     refViewInit();
+    populateTrainDates();
     render();
     renderMAChips();
     updatePanel();
@@ -703,6 +813,7 @@
     $('btnDaily').onclick = function(){ setPeriod('daily'); };
     $('btn5m').onclick = function(){ setPeriod('min5'); };
     $('chkRefLine').onchange = function(){ showRefLine = $('chkRefLine').checked; refreshMarkers(); };
+    $('chkVolume').onchange = function(){ showVolume = $('chkVolume').checked; render(true); };
     $('btnTrain').onclick = function(){ setMode(mode==='train'?'view':'train'); };
     $('btnPrev').onclick = function(){ step(-1); };
     $('btnNext').onclick = function(){ step(1); };
@@ -719,9 +830,9 @@
     $('trainDate').addEventListener('change', function(){
       if(mode!=='train') return;
       const s = series('main');
-      const dm = dateStrToMs($('trainDate').value);
-      if(dm==null){ render(true); updatePanel(); return; }
-      const i = nearestIdx(s.t, dm);
+      const dateStr = $('trainDate').value;
+      if(!dateStr){ render(true); updatePanel(); return; }
+      const i = firstIdxOfDate(s, dateStr);
       curIdx = i>=0 ? i : curIdx;
       render();
       updatePanel();
